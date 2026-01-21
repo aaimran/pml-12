@@ -55,6 +55,8 @@ class DatasetInfo:
 VARIANT_ELASTIC = "elastic"
 VARIANT_ANELASTIC_C2 = "anelastic_c2"
 
+PML_TOKEN_RE = re.compile(r"^pml-(?P<mode>on|off)$", flags=re.IGNORECASE)
+
 # --- 2. HELPER FUNCTIONS ---
 
 def dataset_base_and_variant(dataset_name: str) -> Tuple[str, Optional[str]]:
@@ -81,6 +83,39 @@ def dataset_base_and_variant(dataset_name: str) -> Tuple[str, Optional[str]]:
     if not base:
         base = dataset_name
     return base, variant
+
+
+def parse_stencil_order_pml_ver(base: str) -> Optional[Tuple[str, str, str, str]]:
+    parts = [p for p in base.split('_') if p]
+    if len(parts) < 3:
+        return None
+
+    stencil, order = parts[0], parts[1]
+
+    pml_mode: Optional[str] = None
+    rest: List[str] = []
+    for p in parts[2:]:
+        m = PML_TOKEN_RE.match(p)
+        if m and pml_mode is None:
+            pml_mode = m.group('mode').lower()
+        else:
+            rest.append(p)
+
+    if not pml_mode:
+        return None
+
+    # Version token(s) come after the PML token.
+    # Convention supported:
+    # - ..._pml-off_ref -> ver = ref
+    # - ..._pml-on_B_v3 -> ver = v3
+    if not rest:
+        ver = ""
+    elif rest[0].lower() == 'b' and len(rest) >= 2:
+        ver = '_'.join(rest[1:])
+    else:
+        ver = '_'.join(rest)
+
+    return stencil, order, pml_mode, ver
 
 def iter_dataset_files(data_dir: Path) -> List[Path]:
     patterns = ["*.dat"]
@@ -303,15 +338,16 @@ app.layout = dbc.Container(
 )
 def update_dataset_table(selected_station: str, selection_store: Dict):
     infos = by_station.get(selected_station or "", [])
-    stencil_to_variants: Dict[str, Dict[Tuple[str, str], Dict[str, str]]] = {}
+    stencil_to_variants: Dict[str, Dict[Tuple[str, str, str], Dict[str, str]]] = {}
     
     for info in infos:
         base, variant = dataset_base_and_variant(info.dataset)
         if variant not in (VARIANT_ELASTIC, VARIANT_ANELASTIC_C2): continue
-        parts = base.split('_')
-        if len(parts) < 3: continue
-        stencil, order, ver = parts[0], parts[1], '_'.join(parts[2:])
-        key = (order, ver)
+        parsed = parse_stencil_order_pml_ver(base)
+        if parsed is None:
+            continue
+        stencil, order, pml_mode, ver = parsed
+        key = (order, pml_mode, ver)
         if stencil not in stencil_to_variants: stencil_to_variants[stencil] = {}
         if key not in stencil_to_variants[stencil]: stencil_to_variants[stencil][key] = {}
         stencil_to_variants[stencil][key].setdefault(variant, str(info.path))
@@ -319,11 +355,20 @@ def update_dataset_table(selected_station: str, selection_store: Dict):
     sorted_stencils = sorted(stencil_to_variants.keys(), key=lambda s: ['traditional', 'upwind', 'upwind-drp'].index(s) if s in ['traditional', 'upwind', 'upwind-drp'] else 999)
     grouped = {}
     base_order = []
+
+    def sort_key(k: Tuple[str, str, str]) -> Tuple[int, int, str]:
+        order_s, pml_s, ver_s = k
+        try:
+            order_i = int(order_s)
+        except ValueError:
+            order_i = 10**9
+        pml_rank = 0 if pml_s.lower() == 'off' else 1
+        return (order_i, pml_rank, ver_s)
     
     for stencil in sorted_stencils:
-        for key in sorted(stencil_to_variants[stencil].keys()):
-            order, ver = key
-            base = f"{stencil}_{order}_{ver}"
+        for key in sorted(stencil_to_variants[stencil].keys(), key=sort_key):
+            order, pml_mode, ver = key
+            base = f"{stencil}_{order}_pml-{pml_mode}_{ver}" if ver else f"{stencil}_{order}_pml-{pml_mode}"
             grouped[base] = stencil_to_variants[stencil][key]
             base_order.append(base)
 
@@ -341,26 +386,22 @@ def update_dataset_table(selected_station: str, selection_store: Dict):
         elif grouped[first_base].get(VARIANT_ANELASTIC_C2): selection_store[first_base][VARIANT_ANELASTIC_C2] = True
 
     header = html.Thead(html.Tr([html.Th("Stencil"), html.Th("Order"), html.Th("PML"), html.Th("Ver."), html.Th("Elastic"), html.Th("Anelastic (c=2)")]))
-    
-    # Helper extractors
-    def extract_pml(b): m = re.search(r"pml-(on|off)", b, re.IGNORECASE); return m.group(1) if m else "?"
-    def extract_ver(b): m = re.search(r"B_([^_]+)", b); return m.group(1) if m else ""
 
     rows = []
     for stencil in sorted_stencils:
-        sorted_keys = sorted(stencil_to_variants[stencil].keys())
+        sorted_keys = sorted(stencil_to_variants[stencil].keys(), key=sort_key)
         for i, key in enumerate(sorted_keys):
-            order, ver = key
-            base = f"{stencil}_{order}_{ver}"
+            order, pml_mode, ver = key
+            base = f"{stencil}_{order}_pml-{pml_mode}_{ver}" if ver else f"{stencil}_{order}_pml-{pml_mode}"
             variants = grouped[base]
             elastic_path, anelastic_path = variants.get(VARIANT_ELASTIC), variants.get(VARIANT_ANELASTIC_C2)
             saved = selection_store.get(base, {}) if isinstance(selection_store, dict) else {}
             
             elastic_cell = html.Td(dcc.Checklist(id={"type": "dataset-elastic", "base": base}, options=[{"label": "", "value": "on", "disabled": elastic_path is None}], value=["on"] if bool(saved.get(VARIANT_ELASTIC)) and elastic_path else []), style={"textAlign": "right"})
             anelastic_cell = html.Td(dcc.Checklist(id={"type": "dataset-anelastic", "base": base}, options=[{"label": "", "value": "on", "disabled": anelastic_path is None}], value=["on"] if bool(saved.get(VARIANT_ANELASTIC_C2)) and anelastic_path else []), style={"textAlign": "left"})
-            
-            pml_val = extract_pml(base)
-            ver_val = extract_ver(base)
+
+            pml_val = pml_mode
+            ver_val = ver
             
             row_children = [html.Td(stencil, rowSpan=len(sorted_keys), style={"textAlign": "center"})] if i == 0 else []
             row_children.extend([html.Td(order, style={"textAlign": "center"}), html.Td(pml_val, style={"textAlign": "center"}), html.Td(ver_val, style={"textAlign": "center"}), elastic_cell, anelastic_cell])
