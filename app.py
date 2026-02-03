@@ -55,7 +55,7 @@ class DatasetInfo:
 VARIANT_ELASTIC = "elastic"
 VARIANT_ANELASTIC_C2 = "anelastic_c2"
 
-PML_TOKEN_RE = re.compile(r"^pml-(?P<mode>on|off)$", flags=re.IGNORECASE)
+PML_TOKEN_RE = re.compile(r"^pml-(?P<mode>on|off|60)$", flags=re.IGNORECASE)
 RES_TOKEN_RE = re.compile(r"^res-(?P<value>[+-]?(?:\d+(?:\.\d+)?|\.\d+))$", flags=re.IGNORECASE)
 
 # --- 2. HELPER FUNCTIONS ---
